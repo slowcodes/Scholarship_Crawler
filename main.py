@@ -8,8 +8,8 @@ Features:
 - Fetches public universities + official websites from Wikidata
 - Respects robots.txt (best effort)
 - Crawls scholarship-related pages only
-- Extracts: date published, department, faculty, deadline
-- Saves CSV and JSON outputs
+- Extracts: text information, date published, department, faculty, deadline
+- Saves/updates scholarships in SQLite
 
 Usage:
     python scholarship_crawler.py --country "Germany"
@@ -20,12 +20,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
-import json
+import hashlib
 import re
-import time
+import sqlite3
 from collections import deque
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Set, Tuple
 from urllib.parse import urljoin, urlparse, urldefrag
@@ -112,6 +111,7 @@ META_DATE_KEYS = [
 ]
 
 MAX_TEXT_SCAN = 15000
+MAX_TEXT_INFORMATION = 4000
 
 
 @dataclass
@@ -128,11 +128,19 @@ class ScholarshipRecord:
     university_website: str
     scholarship_page: str
     title: str
+    text_information: Optional[str]
     date_published: Optional[str]
     department: Optional[str]
     faculty: Optional[str]
     deadline: Optional[str]
     discovered_at_utc: str
+
+
+@dataclass
+class SaveStats:
+    inserted: int = 0
+    updated: int = 0
+    unchanged: int = 0
 
 
 class RobotsCache:
@@ -238,6 +246,22 @@ def extract_title(soup: BeautifulSoup) -> str:
     return "Untitled scholarship page"
 
 
+def scholarship_content_hash(record: ScholarshipRecord) -> str:
+    payload = "||".join([
+        record.country or "",
+        record.university or "",
+        record.university_website or "",
+        record.scholarship_page or "",
+        record.title or "",
+        record.text_information or "",
+        record.date_published or "",
+        record.department or "",
+        record.faculty or "",
+        record.deadline or "",
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def extract_fields_from_page(html: str, url: str, country: str, university: University) -> Optional[ScholarshipRecord]:
     soup = BeautifulSoup(html, "html.parser")
 
@@ -247,6 +271,7 @@ def extract_fields_from_page(html: str, url: str, country: str, university: Univ
     title = extract_title(soup)
     text = soup.get_text("\n", strip=True)
     scan_text = text[:MAX_TEXT_SCAN]
+    text_information = scan_text[:MAX_TEXT_INFORMATION] or None
 
     # Basic relevance filter
     relevance_blob = f"{title}\n{scan_text[:4000]}".lower()
@@ -302,6 +327,7 @@ def extract_fields_from_page(html: str, url: str, country: str, university: Univ
         university_website=university.website,
         scholarship_page=url,
         title=title,
+        text_information=text_information,
         date_published=published,
         department=department,
         faculty=faculty,
@@ -452,34 +478,119 @@ async def crawl_university(
     return list(dedup.values())
 
 
-def save_csv(path: str, records: List[ScholarshipRecord]) -> None:
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "country",
-                "university",
-                "university_website",
-                "scholarship_page",
-                "title",
-                "date_published",
-                "department",
-                "faculty",
-                "deadline",
-                "discovered_at_utc",
-            ],
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scholarships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            country TEXT NOT NULL,
+            university TEXT NOT NULL,
+            university_website TEXT NOT NULL,
+            scholarship_page TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            text_information TEXT,
+            date_published TEXT,
+            department TEXT,
+            faculty TEXT,
+            deadline TEXT,
+            discovered_at_utc TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL,
+            content_hash TEXT NOT NULL
         )
-        writer.writeheader()
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scholarships_university ON scholarships(university)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scholarships_deadline ON scholarships(deadline)")
+    conn.commit()
+
+
+def save_to_sqlite(path: str, records: List[ScholarshipRecord]) -> SaveStats:
+    stats = SaveStats()
+    conn = sqlite3.connect(path)
+    try:
+        init_db(conn)
+        now_utc = datetime.now(timezone.utc).isoformat()
         for rec in records:
-            writer.writerow(asdict(rec))
+            row = conn.execute(
+                "SELECT content_hash FROM scholarships WHERE scholarship_page = ?",
+                (rec.scholarship_page,),
+            ).fetchone()
+
+            new_hash = scholarship_content_hash(rec)
+
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO scholarships (
+                        country, university, university_website, scholarship_page, title,
+                        text_information, date_published, department, faculty, deadline,
+                        discovered_at_utc, updated_at_utc, content_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rec.country,
+                        rec.university,
+                        rec.university_website,
+                        rec.scholarship_page,
+                        rec.title,
+                        rec.text_information,
+                        rec.date_published,
+                        rec.department,
+                        rec.faculty,
+                        rec.deadline,
+                        rec.discovered_at_utc,
+                        now_utc,
+                        new_hash,
+                    ),
+                )
+                stats.inserted += 1
+                continue
+
+            old_hash = row[0]
+            if old_hash == new_hash:
+                stats.unchanged += 1
+                continue
+
+            conn.execute(
+                """
+                UPDATE scholarships
+                SET country = ?,
+                    university = ?,
+                    university_website = ?,
+                    title = ?,
+                    text_information = ?,
+                    date_published = ?,
+                    department = ?,
+                    faculty = ?,
+                    deadline = ?,
+                    updated_at_utc = ?,
+                    content_hash = ?
+                WHERE scholarship_page = ?
+                """,
+                (
+                    rec.country,
+                    rec.university,
+                    rec.university_website,
+                    rec.title,
+                    rec.text_information,
+                    rec.date_published,
+                    rec.department,
+                    rec.faculty,
+                    rec.deadline,
+                    now_utc,
+                    new_hash,
+                    rec.scholarship_page,
+                ),
+            )
+            stats.updated += 1
+
+        conn.commit()
+        return stats
+    finally:
+        conn.close()
 
 
-def save_json(path: str, records: List[ScholarshipRecord]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump([asdict(r) for r in records], f, ensure_ascii=False, indent=2)
-
-
-async def run(country: str, max_pages_per_site: int, limit_universities: Optional[int]) -> None:
+async def run(country: str, max_pages_per_site: int, limit_universities: Optional[int], sqlite_path: str) -> None:
     print(f"[INFO] Fetching public universities for: {country}")
     universities = await get_public_universities(country)
 
@@ -517,16 +628,13 @@ async def run(country: str, max_pages_per_site: int, limit_universities: Optiona
         uniq[(rec.university, rec.scholarship_page)] = rec
 
     final_records = list(uniq.values())
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = f"scholarships_{country.lower().replace(' ', '_')}_{timestamp}.csv"
-    json_path = f"scholarships_{country.lower().replace(' ', '_')}_{timestamp}.json"
-
-    save_csv(csv_path, final_records)
-    save_json(json_path, final_records)
+    stats = save_to_sqlite(sqlite_path, final_records)
 
     print(f"\n[DONE] Saved {len(final_records)} records")
-    print(f"CSV : {csv_path}")
-    print(f"JSON: {json_path}")
+    print(f"SQLite DB : {sqlite_path}")
+    print(f"Inserted  : {stats.inserted}")
+    print(f"Updated   : {stats.updated}")
+    print(f"Unchanged : {stats.unchanged}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -534,6 +642,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--country", required=True, help='Country name, e.g. "Germany", "France", "Netherlands"')
     parser.add_argument("--max-pages-per-site", type=int, default=80, help="Maximum pages to inspect per university website")
     parser.add_argument("--limit-universities", type=int, default=None, help="Optional limit for testing")
+    parser.add_argument("--sqlite-path", default="scholarships.db", help="SQLite database file path")
     return parser
 
 
@@ -543,6 +652,7 @@ def main() -> None:
         country=args.country,
         max_pages_per_site=args.max_pages_per_site,
         limit_universities=args.limit_universities,
+        sqlite_path=args.sqlite_path,
     ))
 
 
