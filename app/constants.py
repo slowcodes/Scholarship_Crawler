@@ -53,16 +53,16 @@ NEGATIVE_HINTS = [
 ]
 
 DATE_PATTERNS = [
-    re.compile(r"(published|posted|date published|publication date)\\s*[:\\-]?\\s*([A-Za-z0-9,./\\- ]{6,40})", re.I),
-    re.compile(r"(deadline|closing date|application deadline|apply by)\\s*[:\\-]?\\s*([A-Za-z0-9,./\\- ]{6,40})", re.I),
+    re.compile(r"(published|posted|date published|publication date)\s*[:\-]?\s*([A-Za-z0-9,./\- ]{6,40})", re.I),
+    re.compile(r"(deadline|closing date|application deadline|apply by)\s*[:\-]?\s*([A-Za-z0-9,./\- ]{6,40})", re.I),
 ]
 
 DEPARTMENT_PATTERNS = [
-    re.compile(r"(department)\\s*[:\\-]?\\s*([A-Za-z0-9,&'()./\\- ]{3,120})", re.I),
+    re.compile(r"(department)\s*[:\-]?\s*([A-Za-z0-9,&'()./\- ]{3,120})", re.I),
 ]
 
 FACULTY_PATTERNS = [
-    re.compile(r"(faculty|school|college)\\s*[:\\-]?\\s*([A-Za-z0-9,&'()./\\- ]{3,120})", re.I),
+    re.compile(r"(faculty|school|college)\s*[:\-]?\s*([A-Za-z0-9,&'()./\- ]{3,120})", re.I),
 ]
 
 META_DATE_KEYS = [

@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urldefrag, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
-import aiohttp
 from bs4 import BeautifulSoup
 
 from app.constants import HEADERS, SCHOLARSHIP_KEYWORDS, WIKIDATA_ENDPOINT
 from app.models.entities import SaveStats, ScholarshipRecord, University
-from app.repos.scholarship_repo import save_to_sqlite
+from app.repos.scholarship_repo import upsert_scholarships
 from app.services.extraction_service import extract_fields_from_page
 
 
@@ -19,7 +18,9 @@ class RobotsCache:
     def __init__(self) -> None:
         self._cache: dict[str, RobotFileParser] = {}
 
-    async def allowed(self, session: aiohttp.ClientSession, url: str, user_agent: str) -> bool:
+    async def allowed(self, session: Any, url: str, user_agent: str) -> bool:
+        import aiohttp
+
         parsed = urlparse(url)
         base = f"{parsed.scheme}://{parsed.netloc}"
         robots_url = f"{base}/robots.txt"
@@ -58,7 +59,9 @@ def looks_html_content_type(content_type: str | None) -> bool:
     return "text/html" in lowered or "application/xhtml+xml" in lowered
 
 
-async def fetch_text(session: aiohttp.ClientSession, url: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+async def fetch_text(session: Any, url: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    import aiohttp
+
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=25), allow_redirects=True) as resp:
             content_type = resp.headers.get("Content-Type")
@@ -73,6 +76,8 @@ async def fetch_text(session: aiohttp.ClientSession, url: str) -> tuple[Optional
 
 
 async def get_public_universities(country_name: str) -> list[University]:
+    import aiohttp
+
     query = f"""
     SELECT DISTINCT ?item ?itemLabel ?website WHERE {{
       ?country rdfs:label "{country_name}"@en .
@@ -142,7 +147,7 @@ def extract_candidate_links(html: str, base_url: str) -> list[str]:
 
 
 async def crawl_university(
-    session: aiohttp.ClientSession,
+    session: Any,
     robots: RobotsCache,
     university: University,
     country: str,
@@ -193,8 +198,9 @@ async def crawl_and_save(
     country: str,
     max_pages_per_site: int,
     limit_universities: Optional[int],
-    sqlite_path: str,
 ) -> tuple[int, SaveStats]:
+    import aiohttp
+
     universities = await get_public_universities(country)
 
     if limit_universities:
@@ -226,5 +232,5 @@ async def crawl_and_save(
         uniq[(record.university, record.scholarship_page)] = record
 
     final_records = list(uniq.values())
-    stats = save_to_sqlite(sqlite_path, final_records)
+    stats = upsert_scholarships(final_records)
     return len(final_records), stats
